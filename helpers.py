@@ -11,4 +11,6 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
     current_datetime: str
     current_weather: str
+    current_location: str
+    mood: str
     rules: list[str]

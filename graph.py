@@ -10,14 +10,6 @@ import chatbot as cb
 from helpers import State
 
 
-# def stream_graph_updates(user_input: str):
-#     for event in graph.stream(
-#         {"messages": [{"role": "user", "content": user_input}]}, config=config
-#     ):
-#         for value in event.values():
-#             print("AI:", value["messages"][-1].content)
-
-
 def build_graph() -> CompiledStateGraph:
     """Create a graph for conversational AI."""
     memory = MemorySaver()
@@ -28,11 +20,18 @@ def build_graph() -> CompiledStateGraph:
         if not name.startswith("_"):
             graph_builder.add_node(name, method)
 
-    graph_builder.set_entry_point("inject_system_message")
-    graph_builder.add_edge("inject_system_message", "inject_datetime")
-    graph_builder.add_edge("inject_datetime", "inject_weather")
-    graph_builder.add_edge("inject_weather", "inject_rules")
-    graph_builder.add_edge("inject_rules", "prompt")
+    preprocessing_nodes = [
+        "inject_datetime",
+        "inject_location",
+        "inject_weather",
+    ]
+
+    graph_builder.set_entry_point("inject_rules")
+    for node in preprocessing_nodes:
+        graph_builder.add_edge("inject_rules", node)
+    graph_builder.add_edge("inject_rules", "inject_system_message")
+    graph_builder.add_edge("inject_system_message", "introspect")
+    graph_builder.add_edge(preprocessing_nodes + ["introspect"], "prompt")
     graph_builder.add_edge("prompt", "remove_actions")
     graph_builder.set_finish_point("remove_actions")
     graph = graph_builder.compile(checkpointer=memory)
@@ -45,25 +44,3 @@ def build_config(system_message: str) -> RunnableConfig:
         metadata={"system_prompt": system_message},
         configurable={"thread_id": uuid.uuid4()},
     )
-
-
-def main():
-    """Main"""
-    ai = "You are Riliane, a cute 14-year old girl."
-    config = build_config(ai)
-    graph = build_graph()
-
-    while True:
-        user_input = input("User: ")
-        if user_input.lower() in ["quit", "exit", "q"]:
-            print("Goodbye!")
-            break
-        output = graph.invoke(
-            {"messages": [{"role": "user", "content": user_input}]},
-            config=config,
-        )
-        print("AI:", output["messages"][-1].content, end="\n\n")
-
-
-if __name__ == "__main__":
-    main()
