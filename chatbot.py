@@ -1,90 +1,186 @@
-"""Chatbot Module"""
+"""Chatbot Main Module"""
 
 import re
-import json
 from datetime import datetime
+from typing import TypedDict, Annotated, Literal
+from langgraph.graph.message import add_messages
+from langgraph.types import Command
 from langchain_core.runnables.config import RunnableConfig
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import PromptTemplate
 from langchain_ollama import ChatOllama
-from helpers import State
+from helpers import convert_to_chatml
+from react import evaluate_ai_sentiment
 
-LLM = ChatOllama(model="llama3.1:8b")
+LLM = ChatOllama(
+    model="dolphin3:8b",
+    verbose=True,
+    num_ctx=8192,
+    num_predict=512,
+)
 
-with open("rules.json", mode="r", encoding="utf-8") as fp:
-    RULES = json.load(fp)
+
+class State(TypedDict):
+    """State"""
+
+    messages: Annotated[list, add_messages]
+    system: str
+    user: str
+    ai: str
+    mood: str
+    decomposition: str
+    reasoning: str
+    review_comment: str
+    current_datetime: str
+    current_weather: str
+    current_location: str
 
 
-def prompt(state: State):
+class ReactOutput(TypedDict):
+    """Reaction guide format."""
+
+    instructions: list[str]
+
+
+class ReviewOutput(TypedDict):
+    """Review output format."""
+
+    review_score: float
+    review_comments: str
+
+
+RESPOND_TEMPLATE = PromptTemplate.from_file("assets/respond.md")
+REACT_TEMPLATE = PromptTemplate.from_file("assets/react.md")
+
+
+def respond(state: State):
     """Call the chat model with a list of messages."""
 
     # Insert metadata and rules into HumanMessage
-    message = [
-        "Environment:",
-        f"- {state['current_datetime']}",
-        # f"- {state['current_location']}\n"
-        f"- {state['current_weather']}",
-        f"\nCurrent mood:\n{state['mood']}",
-        f"\nUser: {state['messages'][-1].content}",
-    ]
-    message = "\n".join(message)
-    messages = state["messages"][:-1] + [message]
-    token_count = count_tokens_approximately(messages)
-    print("===Start DEBUG===")
+    if state["review_comment"]:
+        instruction = "\n\n".join(
+            [
+                "Your response wasn't in-character enough, rewrite.",
+                f"Your response: {state['ai']}",
+                f"Review: {state['review_comment']}",
+            ]
+        )
+    else:
+        instruction = "Use the information below to respond in-character."
+    message = RESPOND_TEMPLATE.invoke(
+        {
+            "instruction": instruction,
+            # "datetime": state["current_datetime"],
+            # "weather": state["current_weather"],
+            "user": state["user"],
+            # "reasoning": state["reasoning"],
+            "reaction": state["mood"],
+        }
+    ).to_string()
+    message = convert_to_chatml(
+        [{"role": "system", "content": state["system"]}]
+        + state["messages"]
+        + [{"role": "user", "content": message}],
+        append_ai=True,
+    )
+
+    print("===START DEBUG===")
     print(message)
-    print("\nToken count:", token_count)
     print("===END DEBUG===")
 
-    return {"messages": [LLM.invoke(messages)]}
+    return {"ai": LLM.invoke(message).content}
 
 
-def introspect(state: State):
-    """Read the latest prompt, the mood history, and come up with feelings on how to respond."""
-    try:
-        mood = str(state["mood"])
-    except KeyError:
-        mood = "I currently feel neutral."
-
-    lines = [
-        "Answer in a single sentence:",
-        "How does the current prompt make you feel?;",
-        "How did your previous mood affect what your current feeling?; and",
-        "Which part of the conversation made you feel what you are currently feeling?"
-        f"\nPrevious mood:\n{mood}",
-        f"\nCurrent prompt:\n{state['messages'][-1].content}",
+def review(
+    state: State, config: RunnableConfig
+) -> Command[Literal["respond", "cleanup"]]:
+    """Do some checks to evaluate the AI response."""
+    system_prompts = [
+        """You are an evaluator. 
+    Score between 0.0 (not in character) to 1.0 (perfectly in character) for the response.
+    Be strict, and exaggerate the character's personality.""",
+        """You aim to generate authentic responses in line with the character profile.
+    Score between 0.0 (needs more curse words) to 1.0 (no curse words needed) for the response.""",
     ]
-    message = "\n".join(lines)
-    system_msg = next(m for m in state["messages"] if isinstance(m, SystemMessage))
-    return {"mood": LLM.invoke([system_msg, HumanMessage(message)]).content}
+    output = {"review_score": 0.0, "review_comments": ""}
+    for system_prompt in system_prompts:
+        system_prompt += f"Character Profile:\n{config['metadata']['profile']}"
+        message = convert_to_chatml(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": state["ai"]},
+            ]
+        )
+        output |= dict(LLM.with_structured_output(ReviewOutput).invoke(message))
+
+        if output["review_score"] < 0.5:
+            goto = "respond"
+            break
+    else:
+        goto = "cleanup"
+
+    return Command(update={"review_comment": output["review_comments"]}, goto=goto)
 
 
-def generate_persona(profile: dict[str, str | list[str]]):
-    """Generate a persona based on a profile."""
-    lines = ["Describe a persona based on the following:"]
-    for k, v in profile.items():
-        if isinstance(v, str):
-            lines.append(f"- {k}: {v}")
-        elif isinstance(v, list):
-            lines.append(f"- {k}:")
-            lines.extend(f"  - {item}" for item in v)
-    lines.append("All points should be present in the response.")
-    lines.append("Skip the introduction and output the response directly.")
-    message = "\n".join(lines)
-    output = LLM.invoke([{"role": "user", "content": message}])
-    return str(output.content)
+def decompose(state: State):
+    """Break down the user prompt to understand what was written."""
+    lines = (
+        "In a concise manner, understand what the user has written."
+        f"\nUser: {state['user']}"
+    )
+    return {"decomposition": LLM.invoke([HumanMessage(lines)]).content}
 
 
-def inject_system_message(state: State, config: RunnableConfig):
+def reason(state: State):
+    """Come up with a response to the user prompt."""
+    lines = "\n".join(
+        [
+            "In a concise manner, objectively explain how to respond to the prompt.",
+            f"\n[USER]\n{state['user']}",
+            f"\n[DECOMPOSITION]\n{state['decomposition']}",
+        ]
+    )
+    return {"reasoning": LLM.invoke([HumanMessage(lines)]).content}
+
+
+def react(state: State):
+    """Ideate on how to respond."""
+    system_prompt = REACT_TEMPLATE.invoke({}).to_string()
+
+    message = evaluate_ai_sentiment(LLM, state["user"], persona=state["system"])
+    message = (
+        "Your current sentiment:\n"
+        + "\n".join([f"- {k}: {v}" for k, v in message.items()])
+        + f"\nUser: {state['user']}"
+    )
+    message = convert_to_chatml(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message},
+        ],
+        append_ai=True,
+    )
+    output = LLM.with_structured_output(ReactOutput).invoke(message)
+    output = "\n".join([f"- {i}" for i in dict(output)["instructions"]])
+    return {"mood": output}
+
+
+def reset(state: State):
+    """Reset states between runs."""
+    return {"review_comment": ""}
+
+
+def inject_persona(state: State, config: RunnableConfig):
     """Inject the system message if not found."""
-    if not any(isinstance(m, SystemMessage) for m in state["messages"]):
-        if "metadata" in config:
-            rules = "\n".join([f"- {rule}" for rule in state["rules"]])
-            message = [config["metadata"]["system_prompt"], "\nRules:", rules]
-            message = "\n".join(message)
-            if "metadata" in config:
-                state["messages"].insert(0, SystemMessage(message))
-            print(f"===System Message===\n{message}\n===END System Message===")
-    return {"messages": state["messages"]}
+    if "metadata" in config:
+        system_template = PromptTemplate.from_file("assets/system.md")
+        rules = "\n".join(f"- {rule}" for rule in config["metadata"]["rules"])
+        message = system_template.invoke(
+            {"persona": config["metadata"]["profile"], "rules": rules}
+        ).to_string()
+        # print(f"===SYSTEM===\n{message}\n===END SYSTEM===")
+        return {"system": message}
+    raise KeyError("metadata")
 
 
 def inject_datetime(state: State):
@@ -109,16 +205,24 @@ def inject_location(state: State):
     return {"current_location": location_msg}
 
 
-def inject_rules(state: State, config: RunnableConfig):
-    """Inject rules that the chatbot must treat as fact."""
-    if "metadata" in config:
-        return {"rules": RULES}
-    return {"rules": []}
-
-
-def remove_actions(state: State):
+def cleanup(state: State):
     """Removes any phrases between two asterisks e.g. *giggles*."""
-    message = str(state["messages"][-1].content)
-    message = re.sub(r"\*[^*]*\*", "", message)
-    state["messages"][-1].content = message
-    return {"messages": state["messages"]}
+    message = re.sub(r"\*[^*]*\*", "", state["ai"])
+    return {"messages": [HumanMessage(state["user"]), AIMessage(message)]}
+
+
+def generate_persona(profile: dict[str, str | list[str]]):
+    """Generate a persona based on a profile."""
+    lines = ["Describe a persona based on the following:"]
+    for k, v in profile.items():
+        if isinstance(v, str):
+            lines.append(f"- {k}: {v}")
+        elif isinstance(v, list):
+            lines.append(f"- {k}:")
+            lines.extend(f"  - {item}" for item in v)
+    lines.append("All points should be present in the response.")
+    lines.append("Skip the introduction and output the response directly.")
+    message = "\n".join(lines)
+    message = convert_to_chatml([{"role": "user", "content": message}])
+    output = LLM.invoke([{"role": "user", "content": message}])
+    return str(output.content)
