@@ -100,7 +100,7 @@ def review(
     Score between 0.0 (not in character) to 1.0 (perfectly in character) for the response.
     Be strict, and exaggerate the character's personality.""",
         """You aim to generate authentic responses in line with the character profile.
-    Score between 0.0 (needs more curse words) to 1.0 (no curse words needed) for the response.""",
+    Score between 0.0 (too formal for this character) to 1.0 (ideal voice match) for the response.""",
     ]
     output = {"review_score": 0.0, "review_comments": ""}
     for system_prompt in system_prompts:
