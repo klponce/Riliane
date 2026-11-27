@@ -12,7 +12,7 @@ def parse_args():
     """Parse arguments."""
     args = argparse.ArgumentParser()
     args.add_argument(
-        "--persona", default="./assets/riliane.md", help="Load a persona."
+        "--persona", default="./assets/riliane7.md", help="Load a persona."
     )
     args.add_argument(
         "--rules", default="./assets/rules.json", help="Load the rules for the chatbot."

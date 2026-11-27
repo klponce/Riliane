@@ -1,2 +1,12 @@
 __pycache__/
 .venv/
+.env
+models/*
+!models/PLACE_MODELS_HERE
+data/*
+!data/PLACE_DATA_HERE
+cuda.log
+.vscode/
+outputs/
+lora_model/
+dataset.json
