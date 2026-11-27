@@ -1,0 +1,2 @@
+Place GGUF model files here (not committed).
+Used by train/generate.py and for exporting the fine-tuned model.

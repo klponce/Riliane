@@ -1,0 +1,2 @@
+Place datasets and OpenAI batch outputs here (not committed).
+Expected by train/: alpaca_data_cleaned.json, split*/ request and response files.
